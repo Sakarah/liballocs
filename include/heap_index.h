@@ -138,8 +138,27 @@ typedef LIFETIME_INSERT_TYPE lifetime_insert_t;
 #define HAS_LIFETIME_POLICIES_ATTACHED(lti) ((lti) & ~(MANUAL_DEALLOCATION_FLAG))
 #endif
 
+#ifdef FINALIZER_LIST
+// The finalizer list should end with a deallocator (except when the memory is
+// allocated by alloca)
+struct finalizer_node
+{
+	_Bool is_list:1;
+	unsigned long addr:(ADDR_BITSIZE-1);
+} __attribute__((packed));
+
+struct finalizer_list
+{
+	void (*finalizer)(void *);
+	struct finalizer_node next;
+};
+#endif
+
 struct extended_insert
 {
+#ifdef FINALIZER_LIST
+	struct finalizer_node finalizer;
+#endif
 #ifdef LIFETIME_POLICIES
 	lifetime_insert_t lifetime;
 #endif

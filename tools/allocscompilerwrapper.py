@@ -1,6 +1,4 @@
-import os, sys, re, subprocess, tempfile, copy
-import distutils
-import distutils.spawn
+import os, sys, json, subprocess
 from compilerwrapper import *
 
 # we have an extra phase
@@ -8,69 +6,46 @@ FAKE_RELOC_LINK = Phase.LINK + 1
 
 class AllocsCompilerWrapper(CompilerWrapper):
 
-    def defaultL1AllocFns(self):
+    def colonSplitEnv(self, key):
+        return [s for s in os.environ.get(key, "").split(':') if s != '']
+
+    def defaultAllocFns(self):
         return []
-
-    def defaultL1FreeFns(self):
-        return []
-    
-    def wordSplitEnv(self, key):
-        return [s for s in os.environ.get(key, "").split(' ') if s != '']
-
-    def allWrapperAllocFns(self):
-        return self.wordSplitEnv("LIBALLOCS_ALLOC_FNS")
-
-    def allL1OrWrapperAllocFns(self):
-        return self.defaultL1AllocFns() + self.allWrapperAllocFns()
-
-    def allSubAllocFns(self):
-        return self.wordSplitEnv("LIBALLOCS_SUBALLOC_FNS")
-
-    def allAllocSzFns(self):
-        return self.wordSplitEnv("LIBALLOCS_ALLOCSZ_FNS")
 
     def allAllocFns(self):
-        return self.allL1OrWrapperAllocFns() + self.allSubAllocFns() + self.allAllocSzFns()
-
-    def allWrapperFreeFns(self):
-        return self.wordSplitEnv("LIBALLOCS_FREE_FNS")
-
-    def allL1OrWrapperFreeFns(self):
-        return self.defaultL1FreeFns() + self.allWrapperFreeFns()
-
-    def allSubFreeFns(self):
-        return self.wordSplitEnv("LIBALLOCS_SUBFREE_FNS")
-
-    def allFreeFns(self):
-        return self.allL1OrWrapperFreeFns() + self.allSubFreeFns()
+        if not hasattr(self, "alloclist"):
+            self.alloclist = self.defaultAllocFns()[:]
+            alloclist_filenames = self.colonSplitEnv("LIBALLOCS_ALLOC_FN_LISTS")
+            for alloclist_filename in alloclist_filenames:
+                self.alloclist += json.load(open(alloclist_filename))
+        return self.alloclist
 
     def symNamesForFns(self, fns):
         syms = []
         for fn in fns:
             if fn != '':
-                # allocfns are "(.*)\((.*)\)(.?)
-                # subfreefns are "(.*)\((.*)\)(->[a-zA-Z0-9_]+)"
-                # l1freefns are "(.*)\((.*)\)"
-                m = re.match("(.*)\((.*)\)(->[a-zA-Z0-9_]+|.)?", fn)
-                fnName = m.groups()[0]
+                fnName = fn["name"]
                 syms += [fnName]
         return syms
 
     # FIXME: we shouldn't caller-wrap allocator entry points (non-wrappers),
     # though we should callee-wrap them (whic we currently do with --wrap,__real_*)
     def allWrappedSymNames(self):
-        return self.symNamesForFns(self.allAllocFns() + self.allFreeFns())
-
-    def findFirstUpperCase(self, s):
-        allLower = s.lower()
-        for i in range(0, len(s)):
-            if s[i] != allLower[i]:
-                return i
-        return -1
+        return self.symNamesForFns(self.allAllocFns())
         
     def getLibAllocsBaseDir(self):
         # FIXME: don't assume we're run in-place
         return os.path.dirname(__file__) + "/../"
+
+    def getLibAllocsFeatures(self):
+        if not hasattr(self, "features"):
+            self.features = []
+            config_file = open(self.getLibAllocsBaseDir() + "include/liballocs_config.h")
+            for line in config_file.readlines():
+                splitted_line = line.split();
+                if len(splitted_line) >= 2 and splitted_line[0] == "#define":
+                    self.features.append(splitted_line[1])
+        return self.features
 
     def getLibNameStem(self):
         return "allocs"
@@ -247,9 +222,8 @@ class AllocsCompilerWrapper(CompilerWrapper):
             # For user-specific allocators, we have generated the callee wrappers
             # ourselves, earlier, in  *only* do this for non-wrappers,
             # i.e. for actual allocators.
-            syms = [x for x in self.allWrappedSymNames() \
-                if x not in self.symNamesForFns(self.allWrapperAllocFns() + self.allAllocSzFns() + \
-                    self.allWrapperFreeFns())]
+            syms = self.symNamesForFns(self.defaultAllocFns())
+            syms += [x["name"] for x in self.allAllocFns() if x["type"].startswith("suballocator") ]
             matches = self.listDefinedSymbolsMatching(filename, syms)
             return (0, sum([["-Wl,--defsym," + m + "=__wrap___real_" + m, "-Wl,--wrap,__real_" + m] \
               for m in matches], []))
@@ -337,102 +311,79 @@ class AllocsCompilerWrapper(CompilerWrapper):
             def writeArgList(fnName, fnSig):
                 stubsfile.write("#define arglist_%s(make_arg) " % fnName)
                 ndx = 0
-                for c in fnSig: 
+                for typ in fnSig:
                     if ndx != 0:
                         stubsfile.write(", ")
-                    stubsfile.write("make_arg(%d, %c)" % (ndx, c))
+                    stubsfile.write("make_arg(%d, %s)" % (ndx, typ))
                     ndx += 1
-                stubsfile.write("\n")
-                stubsfile.write("#define rev_arglist_%s(make_arg) " % fnName)
-                ndx = len(fnSig) - 1
-                for c in fnSig[::-1]: # reverse
-                    if ndx != len(fnSig) - 1:
-                        stubsfile.write(", ")
-                    stubsfile.write("make_arg(%d, %c)" % (ndx, c))
-                    ndx -= 1
-                stubsfile.write("\n")
-                stubsfile.write("#define arglist_nocomma_%s(make_arg) " % fnName)
-                ndx = 0
-                for c in fnSig: 
-                    stubsfile.write("make_arg(%d, %c)" % (ndx, c))
-                    ndx += 1
-                stubsfile.write("\n")
-                stubsfile.write("#define rev_arglist_nocomma_%s(make_arg) " % fnName)
-                ndx = len(fnSig) - 1
-                for c in fnSig[::-1]: # reverse
-                    stubsfile.write("make_arg(%d, %c)" % (ndx, c))
-                    ndx -= 1
                 stubsfile.write("\n")
 
             # generate caller-side alloc stubs
+            allocatorNames = []
             for allocFn in self.allAllocFns():
-                m = re.match("(.*)\((.*)\)(.?)", allocFn)
-                fnName = m.groups()[0]
-                fnSig = m.groups()[1]
-                retSig = m.groups()[2]
-                writeArgList(fnName, fnSig)
-                sizendx = self.findFirstUpperCase(fnSig)
-                if sizendx != -1:
-                    # it's a size char, so flag that up
-                    stubsfile.write("#define size_arg_%s make_argname(%d, %c)\n" % (fnName, sizendx, fnSig[sizendx]))
+                fnName = allocFn["name"]
+                fnType = allocFn["type"]
+                if fnType in ["alloc", "size", "suballocator_alloc"]:
+                    fnSig = allocFn["args"]
+                    writeArgList(fnName, fnSig)
+                    sizendx = allocFn["sizearg"]
+                    if sizendx != -1:
+                        # it's a size char, so flag that up
+                        stubsfile.write("#define size_arg_%s make_argname(%d, %s)\n" % (fnName, sizendx, fnSig[sizendx]))
+                    else:
+                        # If there's no size arg, it's a typed allocation primitive, and
+                        # the size is the size of the thing it returns. How can we get
+                        # at that? Have we built the typeobj already? No, because we haven't
+                        # even built the binary. But we have built the .o, including the
+                        # one containing the "real" allocator function. Call a helper
+                        # to do this.
+                        size_find_command = [self.getLibAllocsBaseDir() \
+                            + "/tools/find-allocated-type-size", fnName] + [ \
+                            objfile for objfile in passedThroughArgs if objfile.endswith(".o")]
+                        self.debugMsg("Calling " + " ".join(size_find_command) + "\n")
+                        outp = subprocess.Popen(size_find_command, stdout=subprocess.PIPE).communicate()[0].decode()
+                        self.debugMsg("Got output: " + outp + "\n")
+                        # we get lines of the form <number> \t <explanation>
+                        # so just chomp the first number
+                        outp_lines = outp.split("\n")
+                        if (len(outp_lines) < 1 or outp_lines[0] == ""):
+                            self.debugMsg("No output from %s" % " ".join(size_find_command))
+                            return 1  # give up now
+                        sz = int(outp_lines[0].split("\t")[0])
+                        stubsfile.write("#define size_arg_%s %d\n" % (fnName, sz))
+                    freeFnName = allocFn["freefn"]
+                    stubsfile.write("#define free_fn_%s %s\n" % (fnName, freeFnName))
+                    stubsfile.write("make_%s_caller_wrapper(%s)\n" % (fnType, fnName))
+                    # for genuine allocators (not wrapper fns), also make a callee wrapper
+                    if fnType == "suballocator_alloc": # FIXME: cover non-sub clases
+                        stubsfile.write("make_callee_wrapper(%s, void *)\n" % fnName)
+                    allocatorNames.append(fnName)
+                elif fnType == "unsized_alloc":
+                    fnSig = allocFn["args"]
+                    writeArgList(fnName, fnSig)
+                    freeFnName = allocFn["freefn"]
+                    stubsfile.write("#define free_fn_%s %s\n" % (fnName, freeFnName))
+                    stubsfile.write("make_unsized_alloc_caller_wrapper(%s)\n" % fnName)
+                    allocatorNames.append(fnName)
+                elif fnType == "suballocator_free":
+                    allocFnName = allocFn["allocfn"]
+                    stubsfile.write("make_suballocator_free_caller_wrapper(%s)\n" % fnName)
+                    # FIXME: cover non-sub and non-void clases
+                    # Maybe FIXME: Next LoC was dead in previous code (seems like it shouldn't)
+                    stubsfile.write("make_void_callee_wrapper(%s)\n" % fnName)
+                # also do caller-side free (non-sub) -wrappers
+                elif fnType == "free":
+                    stubsfile.write("make_free_caller_wrapper(%s)\n" % fnName)
                 else:
-                    # If there's no size arg, it's a typed allocation primitive, and 
-                    # the size is the size of the thing it returns. How can we get
-                    # at that? Have we built the typeobj already? No, because we haven't
-                    # even built the binary. But we have built the .o, including the
-                    # one containing the "real" allocator function. Call a helper
-                    # to do this.
-                    size_find_command = [self.getLibAllocsBaseDir() \
-                        + "/tools/find-allocated-type-size", fnName] + [ \
-                        objfile for objfile in passedThroughArgs if objfile.endswith(".o")]
-                    self.debugMsg("Calling " + " ".join(size_find_command) + "\n")
-                    outp = subprocess.Popen(size_find_command, stdout=subprocess.PIPE).communicate()[0].decode()
-                    self.debugMsg("Got output: " + outp + "\n")
-                    # we get lines of the form <number> \t <explanation>
-                    # so just chomp the first number
-                    outp_lines = outp.split("\n")
-                    if (len(outp_lines) < 1 or outp_lines[0] == ""):
-                        self.debugMsg("No output from %s" % " ".join(size_find_command))
-                        return 1  # give up now
-                    sz = int(outp_lines[0].split("\t")[0])
-                    stubsfile.write("#define size_arg_%s %d\n" % (fnName, sz))
-                if allocFn in self.allL1OrWrapperAllocFns():
-                    stubsfile.write("make_caller_wrapper(%s, %s)\n" % (fnName, retSig))
-                elif allocFn in self.allAllocSzFns():
-                    stubsfile.write("make_size_caller_wrapper(%s, %s)\n" % (fnName, retSig))
-                else:
-                    stubsfile.write("make_suballocator_alloc_caller_wrapper(%s, %s)\n" % (fnName, retSig))
-                # for genuine allocators (not wrapper fns), also make a callee wrapper
-                if allocFn in self.allSubAllocFns(): # FIXME: cover non-sub clases
-                    stubsfile.write("make_callee_wrapper(%s, %s)\n" % (fnName, retSig))
-                stubsfile.flush()
-            # also do caller-side subfree wrappers
-            for freeFn in self.allSubFreeFns():
-                m = re.match("(.*)\((.*)\)(->([a-zA-Z0-9_]+))", freeFn)
-                fnName = m.groups()[0]
-                fnSig = m.groups()[1]
-                allocFnName = m.groups()[3]
-                ptrndx = fnSig.find('P')
-                if ptrndx != -1:
-                    # it's a ptr, so flag that up
-                    stubsfile.write("#define ptr_arg_%s make_argname(%d, %c)\n" % (fnName, ptrndx, fnSig[ptrndx]))
-                writeArgList(fnName, fnSig)
-                stubsfile.write("make_suballocator_free_caller_wrapper(%s, %s)\n" % (fnName, allocFnName))
-                stubsfile.flush()
-                if allocFn in self.allSubFreeFns(): # FIXME: cover non-sub and non-void clases
-                    stubsfile.write("make_void_callee_wrapper(%s)\n" % (fnName))
-            # also do caller-side free (non-sub) -wrappers
-            for freeFn in self.allL1OrWrapperFreeFns():
-                m = re.match("(.*)\((.*)\)", freeFn)
-                fnName = m.groups()[0]
-                fnSig = m.groups()[1]
-                ptrndx = fnSig.find('P')
-                if ptrndx != -1:
-                    # it's a ptr, so flag that up
-                    stubsfile.write("#define ptr_arg_%s make_argname(%d, %c)\n" % (fnName, ptrndx, fnSig[ptrndx]))
-                writeArgList(fnName, fnSig)
-                stubsfile.write("make_free_caller_wrapper(%s)\n" % fnName)
-                stubsfile.flush()
+                    self.debugMsg("Unrecognized allocation function type %s" % fnType)
+
+            # Store somewhere the allocator names
+            stubsfile.write("const char *__liballocs_allocator_names[] = {")
+            for allocName in allocatorNames:
+                stubsfile.write('"%s", ' % allocName)
+            stubsfile.write("(void*)0};\n")
+            stubsfile.flush()
+
             # now we compile the C file ourselves, rather than cilly doing it, 
             # because it's a special magic stub
             stubs_pp = os.path.splitext(stubsfile.name)[0] + ".i"

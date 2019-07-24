@@ -51,6 +51,7 @@ __thread void *__current_allocfn;
 __thread _Bool __currently_allocating;
 __thread void *__current_allocsite;
 __thread size_t __current_allocsz;
+__thread void *__current_freefn;
 __thread int __currently_freeing;
 int __liballocs_global_init(void) { return 0; }
 
@@ -242,6 +243,12 @@ Dl_info dladdr_with_cache(const void *addr)
 	memset(&dummy, 0, sizeof dummy);
 	return dummy;
 }
+
+int __generic_heap_check_for_free_cancellation(void *obj, void *freefn)
+{
+    return 0;
+}
+void __generic_heap_set_deallocator(void *obj, void *freefn) {}
 
 void __notify_ptr_write(const void **dest, const void *val)
 {

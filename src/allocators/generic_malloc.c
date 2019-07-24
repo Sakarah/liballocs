@@ -105,12 +105,14 @@ static pthread_mutex_t mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
 __thread void *__current_allocsite;
 __thread void *__current_allocfn;
 __thread size_t __current_allocsz;
+__thread void *__current_freefn;
 __thread int __currently_freeing;
 __thread int __currently_allocating;
 #else
 void *__current_allocsite;
 void *__current_allocfn;
 size_t __current_allocsz;
+void *__current_freefn;
 int __currently_freeing;
 int __currently_allocating;
 #endif
@@ -543,7 +545,12 @@ static void index_insert(void *new_userchunkaddr, size_t requested_size, const v
 		ext_insert->lifetime = MANUAL_DEALLOCATION_FLAG;
 	}
 #endif
-	
+
+#ifdef FINALIZER_LIST
+	ext_insert->finalizer.is_list = 0;
+	ext_insert->finalizer.addr = (uintptr_t) __current_freefn; // Might be changed later
+#endif
+
 	struct big_allocation *this_chunk_bigalloc = NULL;
 	/* If we're big enough, 
 	 * push our metadata into the bigalloc map. 
@@ -812,15 +819,33 @@ out:
 	BIG_UNLOCK
 }
 
+// Returns 1 if we want to prevent the deletion of the object
+int __generic_heap_check_for_free_cancellation(void *obj, void *freefn)
+{
+	if (!obj) return 0;
+#ifdef FINALIZER_LIST
+	struct finalizer_node finalizer = extended_insert_for_chunk(obj)->finalizer;
+	while (finalizer.is_list) finalizer = ((struct finalizer_list *)finalizer.addr)->next;
+	if ( finalizer.addr != freefn)
+	{
+		debug_printf(1, "Warning: ignored wrong deallocator call for object %p\n", obj);
+		return 2;
+	}
+#endif
+#ifdef LIFETIME_POLICIES
+	lifetime_insert_t *lti = lifetime_insert_for_chunk(obj);
+	*lti &= ~MANUAL_DEALLOCATION_FLAG;
+	if (*lti) return 1; // Cancel free if we are still alive
+#endif
+	return 0;
+}
+
 int pre_nonnull_free(void *userptr, size_t freed_usable_size) __attribute__((visibility("hidden")));
 int __liballocs_malloc_pre_nonnull_free(void *userptr, size_t freed_usable_size)
 		__attribute__((alias("pre_nonnull_free")));
 int pre_nonnull_free(void *userptr, size_t freed_usable_size)
 {
 #ifdef LIFETIME_POLICIES
-	lifetime_insert_t *lti = lifetime_insert_for_chunk(userptr);
-	*lti &= ~MANUAL_DEALLOCATION_FLAG;
-	if (*lti) return 1; // Cancel free if we are still alive
 	__notify_free(userptr);
 #endif
 	index_delete(userptr/*, freed_usable_size*/);
@@ -1443,11 +1468,40 @@ liballocs_err_t __generic_heap_set_type(struct big_allocation *maybe_the_allocat
 	return NULL;
 }
 
+#ifdef FINALIZER_LIST
+void __generic_heap_set_deallocator(void *obj, void *freefn)
+{
+	if (!obj) return;
+	struct finalizer_node *finalizer = &extended_insert_for_chunk(obj)->finalizer;
+	while (finalizer->is_list)
+		finalizer = &((struct finalizer_list *)finalizer->addr)->next;
+	finalizer->addr = (uintptr_t) freefn;
+}
+
+void __generic_heap_free(struct allocated_chunk *obj)
+{
+	struct finalizer_node finalizer = extended_insert_for_chunk(obj)->finalizer;
+	while (finalizer.is_list)
+	{
+		struct finalizer_list *finlst = (struct finalizer_list*) finalizer.addr;
+		finlst->finalizer(obj);
+		finalizer = finlst->next;
+		__private_free(finlst);
+	}
+	void (*deallocator)(void *) = (void (*)(void *)) finalizer.addr;
+	if (deallocator) deallocator(obj);
+}
+#endif
+
 struct allocator __generic_malloc_allocator = {
 	.name = "generic malloc",
 	.get_info = __generic_heap_get_info,
 	.is_cacheable = 1,
 	.ensure_big = ensure_big,
 	.set_type = __generic_heap_set_type,
+#ifdef FINALIZER_LIST
+	.free = __generic_heap_free,
+#else
 	.free = (void (*)(struct allocated_chunk *)) free,
+#endif
 };

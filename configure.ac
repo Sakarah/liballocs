@@ -128,6 +128,9 @@ AC_ARG_ENABLE([lifetime-policies],
 AC_ARG_ENABLE([precise-requested-allocsize],
               AS_HELP_STRING([--enable-precise-requested-allocsize], [Make size queries over allocated objects return precisely the size requested at the allocation site (enabled by default)]),
               [precise_requested_allocsize=${enableval}], [precise_requested_allocsize=yes])
+AC_ARG_ENABLE([finalizer-list],
+              AS_HELP_STRING([--enable-finalizer-list], [Enable finalizer lists for dynamic object deletion]),
+              [enable_finalizer_list=${enableval}])
 
 AS_IF([test "x$enable_fake_libunwind" = "xyes"],
       [AC_DEFINE([USE_FAKE_LIBUNWIND],1,[Defined if using our own version of libunwind])])
@@ -138,6 +141,8 @@ AS_IF([test $lifetime_policies != 0],
                           [Expands to the type of lifetime inserts])])
 AS_IF([test "x$precise_requested_allocsize" = "xyes"],
       [AC_DEFINE([PRECISE_REQUESTED_ALLOCSIZE],1,[If defined, liballocs needs to return the precise requested size on size queries])])
+AS_IF([test "x$enable_finalizer_list" = "xyes"],
+      [AC_DEFINE([FINALIZER_LIST],1,[If defined, each allocation holds a finalizer list ending with a deallocator for dynamic object deletion.])])
 
 AC_ARG_WITH([libsystrap],
             [AS_HELP_STRING([--with-libsystrap=DIR],

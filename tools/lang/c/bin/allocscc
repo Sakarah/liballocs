@@ -7,7 +7,7 @@
 # The Right Thing to do is to somehow replicate the source directory structure
 # rooted at the current directory. But it's not clear how to do this in general.
 
-import os, sys, re, subprocess, tempfile
+import os, sys, json
 # HACK
 liballocs_base = os.path.realpath(os.path.dirname(__file__) + "/../../../..")
 sys.path.append(liballocs_base + "/tools")
@@ -21,11 +21,11 @@ os.putenv("LANG", "C") # Allow allocscc to be called with non-english locales
 
 class AllocsCC(AllocsCompilerWrapper):
 
-    def defaultL1AllocFns(self):
-        return ["malloc(Z)p", "calloc(zZ)p", "realloc(pZ)p", "memalign(zZ)p"]
-
-    def defaultL1FreeFns(self):
-        return ["free(P)"]
+    def defaultAllocFns(self):
+        if not hasattr(self, "libc_allocators"):
+            libc_allocator_file = open(liballocs_base + "/tools/lang/c/libc_allocators.json")
+            self.libc_allocators = json.load(libc_allocator_file)
+        return self.libc_allocators
 
     def getCustomCompileArgs(self):
         # "-pipe" interferes with -save-temps, with disastrous conseqeunces
@@ -87,9 +87,9 @@ class AllocsCC(AllocsCompilerWrapper):
             "--load=%s" % (self.getLibAllocsBaseDir() + "tools/lang/c/monalloca/monalloca.cmxs")] + \
             (["--domonalloca"]
                 if len(sourceFiles) > 0 and allSourceFilesAreC else []) + \
-            ["-Wno-unused-variable", "-Wno-unused-label",
-            "--load=%s" % (self.getLibAllocsBaseDir() + "tools/lang/c/trapptrwrites/trapptrwrites.cmxs"),
-            "--dotrap-ptr-writes"]
+            ["-Wno-unused-variable", "-Wno-unused-label"] + \
+            (["--load=%s" % (self.getLibAllocsBaseDir() + "tools/lang/c/trapptrwrites/trapptrwrites.cmxs"),
+            "--dotrap-ptr-writes"] if "LIFETIME_POLICIES" in self.getLibAllocsFeatures() else [])
         # We need the above -Wno-unused-... because CIL creates
         # some unused stuff (unavoidably, I believe) which will
         # make compilation done with -Werror barf if we don't

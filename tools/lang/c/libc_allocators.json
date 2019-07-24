@@ -1,0 +1,34 @@
+[
+    { 
+        "name": "malloc",
+        "type": "alloc",
+        "args": ["size_t"],
+        "sizearg": 0,
+        "freefn": "free"
+    },
+    {
+        "name": "calloc",
+        "type": "alloc",
+        "args": ["size_t", "size_t"],
+        "sizearg": 1,
+        "freefn": "free"
+    },
+    {
+        "name": "memalign",
+        "type": "alloc",
+        "args": ["size_t", "size_t"],
+        "sizearg": 1,
+        "freefn": "free"
+    },
+    {
+        "name": "realloc",
+        "type": "alloc",
+        "args": ["void *", "size_t"],
+        "sizearg": 1,
+        "freefn": "free"
+    },
+    {
+        "name": "free",
+        "type": "free"
+    }
+]
